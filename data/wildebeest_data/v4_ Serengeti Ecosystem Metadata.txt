@@ -1,0 +1,73 @@
+Name of File: Serengeti ecosystem
+
+Source of Data (institute): Digitized by FZS / TWCM from 1:50,000
+
+Person to contact: Honori Maliti
+
+How was data collected: digitized from 1:50,000 map sheets
+
+Description of data: serengeti ecosystem boundaries including park, and protected areas
+
+Projection: UTM Zone 36S
+
+Datum: Arc1960
+
+Date Aquired: 1996
+
+Modification	1: Turned polylines into polygons, snapped boundaries, separate polygons by protected area  
+		2: added Masai Mara (From ILRI)
+		3: removed gaps along Kenyan border
+		4: Updated boundary of SNP with adjacent PA from GPS boundary beacon survey by TANAPA
+		5: Updated external boundary of game reserves; Maswa (Tanzanian Game Trackers), Grumeti and Ikorongo (Sasakwa VIP Safaris)
+		6: Added external boundary of Ikona and Makao WMA from GPS boundary beacon survey by FZS
+		7: Added external boundary of Kijereshi Game Reserve digitized from TAWIRI report (livestock survey 2016) 
+
+Date Modified	1: Nov 2003
+		2: 
+		3: May 2016
+		4: Mar 2017
+		5: Mar 2017
+		6: Mar 2017
+		7: Mar 2017
+
+Modified by whom1: Grant Hopcraft
+		2: 
+		3: Ryan Scott
+		4: Ryan Scott
+		5: Ryan Scott
+		6: Ryan Scott
+		7: Ryan Scott
+
+Reason for modification	1: Cleaning and editing data, suitable for queries
+			2: 
+			3: Topological consistent data set
+			4: Accuracy of Boundary Files
+			5: Accuracy of Boundary Files
+			6: Addition of new protected areas
+			7: Addition of new protected areas
+
+Possible sources of error: Foot note on 1:50,000 maps warns that boundary is estimated. 
+
+Improvement suggestions: Check with national gazetted boundary descriptions, Maswa south-western boundary needs correcting (see maswa_boundary.shp), Ikoma north-western boundary needs correcting (see Grumeti-Ikorongo.shp)
+
+Data missing:
+
+Who has used data:
+
+Contact of people who have used data:
+
+Associated files and databases:
+
+
+
+Grant Hopcraft
+FZS
+Serengeti GIS and Database Center
+granthopcraft@fzs.org
+
+
+
+
+
+
+
