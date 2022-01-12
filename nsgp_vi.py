@@ -40,8 +40,8 @@ class nsgpVI(tf.Module):
         self.mean_len = tf.Variable([0.0], dtype=tf.float64, name='len_mean', trainable=True)
         self.mean_amp = tf.Variable([0.0], dtype=tf.float64, name='var_mean', trainable=True)
         
-        self.amp_inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='amp_ind_points',trainable=False) #z's for amplitude
-        self.len_inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='len_ind_points',trainable=False) #z's for len
+        self.amp_inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='amp_ind_points',trainable=True) #z's for amplitude
+        self.len_inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='len_ind_points',trainable=True) #z's for len
 
         self.kernel_len = kernel_len
         self.kernel_amp = kernel_amp
@@ -59,7 +59,7 @@ class nsgpVI(tf.Module):
         #p(l_z)
         self.inducing_prior = tfd.MultivariateNormalDiag(loc=tf.zeros((NUM_LATENT*n_inducing_points),dtype=tf.float64),name='ind_prior')
         
-        self.vgp_observation_noise_variance = tf.Variable(np.log(np.exp(init_observation_noise_variance)-1),dtype=dtype,name='nv', trainable=False)
+        self.vgp_observation_noise_variance = tf.Variable(np.log(np.exp(init_observation_noise_variance)-1),dtype=dtype,name='nv', trainable=True)
 
         self.num_sequential_samples=num_sequential_samples
         self.num_parallel_samples=num_parallel_samples
@@ -74,7 +74,7 @@ class nsgpVI(tf.Module):
         strategy = tf.distribute.MirroredStrategy()
         dist_dataset = strategy.experimental_distribute_dataset(self.dataset)
 
-        initial_learning_rate = 1e-1
+        initial_learning_rate = 1e-2
         steps_per_epoch = self.num_training_points//(BATCH_SIZE*SEG_LENGTH)
         learning_rate = tf.optimizers.schedules.ExponentialDecay(initial_learning_rate=initial_learning_rate,decay_steps=steps_per_epoch,decay_rate=0.99,staircase=True)
         optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
