@@ -1,0 +1,14 @@
+Predictors:
+
+i)Tourism_fpt Tourism footprint;Inverse weighing of Euclidean distance to number of beds in the lodges or campsites,
+ so that areas near large lodges have higher values and areas away from small lodges or camps have lower values. 
+
+ii) Edge (Distance to park boundary): Euclidean distance to nearest core protected areas boundary in kilometres.
+ The distances were calculated in such a way that inside the protected area the distances were positive while outside negative.
+
+iii)Village_Dist (Distance to nearest village):Euclidean distance to nearest village in kilometres.
+
+iv) Rangerpost_Dist(Distance to park rangerposts): Euclidean distance to nearest park rangerpost calculated in kilometres
+
+v) Temp(Temperature): The degree of hotness or coldness in Celsius extracted from hourly air 
+ temperature from ERA5-Land Hourly - ECMWF Climate Reanalysis product
