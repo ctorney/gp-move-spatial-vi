@@ -86,7 +86,7 @@ require(magick)
 require(tictoc)
 
 #Initialize the google earth engine
-ee_Initialize(user="majaliwa117@gmail.com")
+ee_Initialize(user="username@gmail.com")
 
 #Setting the functions
 #Function to add property with time in milliseconds
