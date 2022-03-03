@@ -32,16 +32,23 @@ NUM_LATENT = 2
 
 class nsgpVI(tf.Module):
                                         
-    def __init__(self,kernel_len,kernel_amp,n_inducing_points,inducing_index_points,dataset,num_training_points, init_observation_noise_variance=1e-2,num_sequential_samples=10,num_parallel_samples=10,kernel_len_priors=None,kernel_amp_priors=None,obs_noise_prior=None,jitter=1e-6):
+    def __init__(self,kernel_len,kernel_amp,n_inducing_points,inducing_index_points,dataset,num_training_points,
+                 num_covars,prior_beta_len_means,prior_beta_amp_means,prior_beta_len_std,prior_beta_amp_std,
+                 init_observation_noise_variance=1e-2,num_sequential_samples=10,num_parallel_samples=10,obs_noise_prior=None,jitter=1e-6):
                
         self.jitter=jitter
+        self.num_covars = num_covars
         
-        #self.L = domain_size
         self.mean_len = tf.Variable([0.0], dtype=tf.float64, name='len_mean', trainable=1)
-        self.beta_len = tf.Variable([0.0], dtype=tf.float64, name='len_beta', trainable=1)
-
         self.mean_amp = tf.Variable([0.0], dtype=tf.float64, name='var_mean', trainable=1)
-        self.beta_amp = tf.Variable([0.0], dtype=tf.float64, name='amp_beta', trainable=1)
+        
+        self.beta_len_mean = tf.Variable(np.zeros(self.num_covars), dtype=tf.float64, name='beta_len_mean',trainable=1)
+        self.beta_amp_mean = tf.Variable(np.zeros(self.num_covars), dtype=tf.float64, name='beta_amp_mean',trainable=1)
+        
+        # self.beta_len_std = tf.Variable(1e-2*np.ones(self.num_covars), dtype=tf.float64, name='beta_len_std',trainable=1)
+        # self.beta_amp_std = tf.Variable(1e-2*np.ones(self.num_covars), dtype=tf.float64, name='beta_amp_std',trainable=1)
+        self.beta_len_std = tfp.util.TransformedVariable(1e-1*np.ones(self.num_covars),tfb.Softplus(), dtype=tf.float64, name='beta_len_std',trainable=1)
+        self.beta_amp_std = tfp.util.TransformedVariable(1e-1*np.ones(self.num_covars),tfb.Softplus(), dtype=tf.float64, name='beta_amp_std',trainable=1)
         
         self.inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='ind_points',trainable=0) #z's for lower level functions
 
@@ -50,17 +57,15 @@ class nsgpVI(tf.Module):
         
         #parameters for variational distribution for len,phi(l_z) and var,phi(sigma_z)
         self.q_mu = tf.Variable(np.zeros((NUM_LATENT*n_inducing_points),dtype=dtype),name='ind_loc_post')
-        #self.variational_inducing_observations_scale = tfp.util.TransformedVariable(np.eye(NUM_LATENT*n_inducing_points, dtype=dtype),tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='ind_scale_post', trainable=1)
-        self.len_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='len_scale_post', trainable=1)
-        self.amp_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='amp_scale_post', trainable=1)
-        self.cc_scale = tf.Variable([np.zeros((n_inducing_points),dtype=dtype)],name='cc_scale',trainable=1)
+        self.len_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='len_scale_post')
+        self.amp_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='amp_scale_post')
+        self.cc_scale = tf.Variable([np.zeros((n_inducing_points),dtype=dtype)],name='cc_scale')
 
         len_op = tf.linalg.LinearOperatorLowerTriangular(self.len_scale)
         amp_op = tf.linalg.LinearOperatorLowerTriangular(self.amp_scale)
         cc_op = tf.linalg.LinearOperatorDiag(self.cc_scale)
         self.q_sqrt = tf.linalg.LinearOperatorBlockLowerTriangular([[len_op],[cc_op,amp_op]])    
-        #self.scale = tfp.util.TransformedVariable([np.eye(2*n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='len_scale_post', trainable=1)
-        #self.q_sqrt = tf.linalg.LinearOperatorLowerTriangular(self.scale)
+
         #approximation to the posterior: phi(l_z)
         self.variational_inducing_observations_posterior = tfd.MultivariateNormalLinearOperator(
                                                                       loc=self.q_mu,
@@ -68,17 +73,20 @@ class nsgpVI(tf.Module):
 
         #p(l_z)
         self.inducing_prior = tfd.MultivariateNormalDiag(loc=tf.zeros((NUM_LATENT*n_inducing_points),dtype=tf.float64),name='ind_prior')
+        
+        
+        self.beta_len_prior = tfp.distributions.Normal(loc=prior_beta_len_means,scale=prior_beta_len_std)
+        self.beta_amp_prior = tfp.distributions.Normal(loc=prior_beta_amp_means,scale=prior_beta_amp_std)
+        
         self.M = n_inducing_points
         
-        
-        self.kernel_len_priors = kernel_len_priors
-        self.kernel_amp_priors = kernel_amp_priors
-        self.obs_noise_prior = obs_noise_prior
+#         self.kernel_len_priors = kernel_len_priors
+#         self.kernel_amp_priors = kernel_amp_priors
+#         self.obs_noise_prior = obs_noise_prior
         
         
         self.obs_max = tf.Variable([0.01], dtype=tf.float64, name='obs_max', trainable=False)
         
-        #self.vgp_observation_noise_variance = tf.Variable(np.log(np.exp(init_observation_noise_variance)-1),dtype=dtype,name='nv', trainable=1)
         self.vgp_observation_noise_variance = tf.Variable(0.0,dtype=dtype,name='nv', trainable=1)
 
         self.num_sequential_samples=num_sequential_samples
@@ -154,12 +162,9 @@ class nsgpVI(tf.Module):
         
         penalty = 2.0*kullback_leibler.kl_divergence(self.variational_inducing_observations_posterior,self.inducing_prior) 
         
-        #if self.kernel_len_priors is not None:
-        #    for prior,var in zip(self.kernel_len_priors,self.kernel_len.trainable_variables):
-        #        penalty -= prior.log_prob(var)
-                
-#        if self.obs_noise_prior is not None:
- #           penalty -= self.obs_noise_prior.log_prob(self.vgp_observation_noise_variance)
+        penalty += tf.reduce_sum(tfp.distributions.kl_divergence(tfp.distributions.Normal(loc=self.beta_len_mean,scale=self.beta_len_std),self.beta_len_prior))
+        penalty += tf.reduce_sum(tfp.distributions.kl_divergence(tfp.distributions.Normal(loc=self.beta_amp_mean,scale=self.beta_amp_std),self.beta_amp_prior))
+        
         
         return penalty
 
@@ -168,7 +173,6 @@ class nsgpVI(tf.Module):
         len_vals, amp_vals = self.get_samples(locations,predictor_values,S=self.num_parallel_samples)   
         K = self.non_stat_vel(time_points, len_vals, amp_vals) # BxNxN
         K = K + (tf.eye(tf.shape(K)[-1], dtype=tf.float64) * ((self.obs_max * tf.nn.sigmoid(self.vgp_observation_noise_variance))+self.jitter))
-
         
         centered_locations = locations[...,1:,:]-locations[...,0,None,:] #centered observations
 
@@ -184,8 +188,21 @@ class nsgpVI(tf.Module):
     
         len_samples,amp_samples = tf.split(samples,NUM_LATENT,axis=2)
         
-        return tf.math.exp(self.mean_len + self.beta_len*predictor_values + len_samples), \
-                tf.math.exp(self.mean_amp + self.beta_amp*predictor_values + amp_samples)
+        # covariate samples
+        B = tf.shape(mean)[0]
+        
+        z = tf.random.normal((S,B,self.num_covars),dtype=tf.float64)
+        zlen = tf.expand_dims(tf.reshape(self.beta_len_mean,(1,1,-1)) + (tf.reshape(self.beta_len_std,(1,1,-1))*z),-1)
+        scaled_predictors_len = tf.linalg.matmul(tf.expand_dims(predictor_values,0),zlen)
+        
+        z = tf.random.normal((S,B,self.num_covars),dtype=tf.float64)
+        zamp = tf.expand_dims(tf.reshape(self.beta_amp_mean,(1,1,-1)) + (tf.reshape(self.beta_amp_std,(1,1,-1))*z),-1)
+        scaled_predictors_amp = tf.linalg.matmul(tf.expand_dims(predictor_values,0),zamp)
+
+        #return tf.math.exp(self.mean_len + len_samples), \
+        #        tf.math.exp(self.mean_amp + amp_samples)
+        return tf.math.softplus(self.mean_len + scaled_predictors_len + len_samples), \
+                tf.math.softplus(self.mean_amp + scaled_predictors_amp + amp_samples)
     
     def get_conditional(self, X):
         
