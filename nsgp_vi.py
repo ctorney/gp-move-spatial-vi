@@ -38,17 +38,14 @@ class nsgpVI(tf.Module):
         
         #self.L = domain_size
         self.mean_len = tf.Variable([0.0], dtype=tf.float64, name='len_mean', trainable=1)
-
-        self.mean_amp = tf.Variable([0.00], dtype=tf.float64, name='var_mean', trainable=1)
-        
-        self.inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='ind_points',trainable=0) #z's for lower level functions
+        self.mean_amp = tf.Variable([0.0], dtype=tf.float64, name='var_mean', trainable=1)
+        self.inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='ind_points',trainable=1) #z's for lower level functions
 
         self.kernel_len = kernel_len
         self.kernel_amp = kernel_amp
         
         #parameters for variational distribution for len,phi(l_z) and var,phi(sigma_z)
         self.q_mu = tf.Variable(np.zeros((NUM_LATENT*n_inducing_points),dtype=dtype),name='ind_loc_post')
-        #self.variational_inducing_observations_scale = tfp.util.TransformedVariable(np.eye(NUM_LATENT*n_inducing_points, dtype=dtype),tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='ind_scale_post', trainable=1)
         self.len_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='len_scale_post', trainable=1)
         self.amp_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='amp_scale_post', trainable=1)
         self.cc_scale = tf.Variable([np.zeros((n_inducing_points),dtype=dtype)],name='cc_scale',trainable=1)
@@ -57,8 +54,6 @@ class nsgpVI(tf.Module):
         amp_op = tf.linalg.LinearOperatorLowerTriangular(self.amp_scale)
         cc_op = tf.linalg.LinearOperatorDiag(self.cc_scale)
         self.q_sqrt = tf.linalg.LinearOperatorBlockLowerTriangular([[len_op],[cc_op,amp_op]])    
-        #self.scale = tfp.util.TransformedVariable([np.eye(2*n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='len_scale_post', trainable=1)
-        #self.q_sqrt = tf.linalg.LinearOperatorLowerTriangular(self.scale)
         #approximation to the posterior: phi(l_z)
         self.variational_inducing_observations_posterior = tfd.MultivariateNormalLinearOperator(
                                                                       loc=self.q_mu,
@@ -76,7 +71,6 @@ class nsgpVI(tf.Module):
         
         self.obs_max = tf.Variable([0.01], dtype=tf.float64, name='obs_max', trainable=False)
         
-        #self.vgp_observation_noise_variance = tf.Variable(np.log(np.exp(init_observation_noise_variance)-1),dtype=dtype,name='nv', trainable=1)
         self.vgp_observation_noise_variance = tf.Variable(0.0,dtype=dtype,name='nv', trainable=1)
 
         self.num_sequential_samples=num_sequential_samples
@@ -95,7 +89,7 @@ class nsgpVI(tf.Module):
         initial_learning_rate = 1e-1
         steps_per_epoch = self.num_training_points//(BATCH_SIZE*SEG_LENGTH)
         learning_rate = tf.optimizers.schedules.ExponentialDecay(initial_learning_rate=initial_learning_rate,decay_steps=steps_per_epoch,decay_rate=0.99,staircase=True)
-        optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate,beta_2=0.99, amsgrad=False)
+        optimizer = tf.keras.optimizers.Adam(learning_rate=initial_learning_rate,beta_2=0.99, amsgrad=False)
         accumulator = GradientAccumulator()
 
         def train_step(inputs):
@@ -151,13 +145,6 @@ class nsgpVI(tf.Module):
     def penalty(self):
         
         penalty = 2.0*kullback_leibler.kl_divergence(self.variational_inducing_observations_posterior,self.inducing_prior) 
-        
-        #if self.kernel_len_priors is not None:
-        #    for prior,var in zip(self.kernel_len_priors,self.kernel_len.trainable_variables):
-        #        penalty -= prior.log_prob(var)
-                
-#        if self.obs_noise_prior is not None:
- #           penalty -= self.obs_noise_prior.log_prob(self.vgp_observation_noise_variance)
         
         return penalty
 
@@ -249,8 +236,6 @@ class nsgpVI(tf.Module):
         
         """Non-stationary integrated Matern12 kernel"""
         stddev = tf.math.sqrt(var)
-        #sigma_ = 0.5*(stddev[...,:-1,0,None] + stddev[...,1:,0,None])
-        #len_ = 0.5*(lengthscales[...,:-1,0,None] + lengthscales[...,1:,0,None])
         sigma_ = stddev[...,0,None]# + stddev[...,1:,0,None])
         len_ = lengthscales[...,0,None]# + lengthscales[...,1:,0,None])
 
