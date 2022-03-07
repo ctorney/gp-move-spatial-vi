@@ -201,8 +201,8 @@ class nsgpVI(tf.Module):
 
         #return tf.math.exp(self.mean_len + len_samples), \
         #        tf.math.exp(self.mean_amp + amp_samples)
-        return tf.math.softplus(self.mean_len + scaled_predictors_len + len_samples), \
-                tf.math.softplus(self.mean_amp + scaled_predictors_amp + amp_samples)
+        return tf.math.exp(self.mean_len + scaled_predictors_len + len_samples), \
+                tf.math.exp(self.mean_amp + scaled_predictors_amp + amp_samples)
     
     def get_conditional(self, X):
         
