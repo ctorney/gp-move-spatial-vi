@@ -32,13 +32,13 @@ NUM_LATENT = 2
 
 class nsgpVI(tf.Module):
                                         
-    def __init__(self,kernel_len,kernel_amp,n_inducing_points,inducing_index_points,dataset,num_training_points, init_observation_noise_variance=1e-2,num_sequential_samples=10,num_parallel_samples=10,kernel_len_priors=None,kernel_amp_priors=None,obs_noise_prior=None,jitter=1e-6):
+    def __init__(self,kernel_len,kernel_amp,n_inducing_points,inducing_index_points,dataset,num_training_points, init_observation_noise_variance=1e-2,num_sequential_samples=10,num_parallel_samples=10,kernel_len_priors=None,kernel_amp_priors=None,obs_noise_prior=None,jitter=1e-6,mean_len=0,mean_amp=0):
                
         self.jitter=jitter
         
         #self.L = domain_size
-        self.mean_len = tf.Variable([0.0], dtype=tf.float64, name='len_mean', trainable=1)
-        self.mean_amp = tf.Variable([0.0], dtype=tf.float64, name='var_mean', trainable=1)
+        self.mean_len = tf.Variable([mean_len], dtype=tf.float64, name='len_mean', trainable=1)
+        self.mean_amp = tf.Variable([mean_amp], dtype=tf.float64, name='var_mean', trainable=1)
         self.inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='ind_points',trainable=1) #z's for lower level functions
 
         self.kernel_len = kernel_len
@@ -86,10 +86,14 @@ class nsgpVI(tf.Module):
         strategy = tf.distribute.MirroredStrategy()
         dist_dataset = strategy.experimental_distribute_dataset(self.dataset)
 
-        initial_learning_rate = 1e-1
+        initial_learning_rate = 1e-2
         steps_per_epoch = self.num_training_points//(BATCH_SIZE*SEG_LENGTH)
         learning_rate = tf.optimizers.schedules.ExponentialDecay(initial_learning_rate=initial_learning_rate,decay_steps=steps_per_epoch,decay_rate=0.99,staircase=True)
-        optimizer = tf.keras.optimizers.Adam(learning_rate=initial_learning_rate,beta_2=0.99, amsgrad=False)
+        optimizer = tf.keras.optimizers.RMSprop(learning_rate=initial_learning_rate,centered=False,epsilon=1e-03)
+        #optimizer = tf.keras.optimizers.Adadelta(learning_rate=initial_learning_rate)
+
+        #optimizer = tf.keras.optimizers.Nadam(learning_rate=initial_learning_rate)#, beta_1=0.0, beta_2=0.6, epsilon=1e-1, amsgrad=False)
+
         accumulator = GradientAccumulator()
 
         def train_step(inputs):
@@ -108,6 +112,8 @@ class nsgpVI(tf.Module):
 
         pbar = tqdm(range(NUM_EPOCHS))
         loss_history = np.zeros((NUM_EPOCHS))
+        len_history = np.zeros((NUM_EPOCHS))
+
 
         for i in pbar:
             batch_count=0    
@@ -126,12 +132,14 @@ class nsgpVI(tf.Module):
                 accumulator.reset()
                     
                 epoch_loss+=batch_loss
-                batch_count+=1
+                batch_count+=batch[0].shape[0]
+                #pbar.set_description("Loss %f" % (epoch_loss/batch_count))
                 pbar.set_description("Loss %f, klen_l %f, kamp_l %f, obs %f" % (epoch_loss/batch_count, self.kernel_len.length_scale.numpy(), self.kernel_amp.length_scale.numpy(),(self.obs_max*tf.nn.sigmoid(self.vgp_observation_noise_variance)).numpy()))
             loss_history[i] = epoch_loss/batch_count
+            len_history[i] = self.kernel_len.length_scale.numpy()
             #print(epoch_loss)
 
-        return loss_history
+        return loss_history, len_history
 
 
 
