@@ -45,10 +45,10 @@ class nsgpVI(tf.Module):
         self.kernel_amp = kernel_amp
         
         #parameters for variational distribution for len,phi(l_z) and var,phi(sigma_z)
-        self.q_mu = tf.Variable(np.zeros((NUM_LATENT*n_inducing_points),dtype=dtype),name='ind_loc_post')
-        self.len_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='len_scale_post', trainable=1)
-        self.amp_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='amp_scale_post', trainable=1)
-        self.cc_scale = tf.Variable([np.zeros((n_inducing_points),dtype=dtype)],name='cc_scale',trainable=1)
+        self.q_mu = tf.Variable(np.zeros((NUM_LATENT*n_inducing_points),dtype=dtype),name='ind_loc_post', trainable=0)
+        self.len_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='len_scale_post', trainable=0)
+        self.amp_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='amp_scale_post', trainable=0)
+        self.cc_scale = tf.Variable([np.zeros((n_inducing_points),dtype=dtype)],name='cc_scale',trainable=0)
 
         len_op = tf.linalg.LinearOperatorLowerTriangular(self.len_scale)
         amp_op = tf.linalg.LinearOperatorLowerTriangular(self.amp_scale)
@@ -63,6 +63,7 @@ class nsgpVI(tf.Module):
         self.inducing_prior = tfd.MultivariateNormalDiag(loc=tf.zeros((NUM_LATENT*n_inducing_points),dtype=tf.float64),name='ind_prior')
         self.M = n_inducing_points
         
+        self.vi_param_list = [self.q_mu, self.len_scale.non_trainable_variables[0], self.amp_scale.non_trainable_variables[0], self.cc_scale] 
         
         self.kernel_len_priors = kernel_len_priors
         self.kernel_amp_priors = kernel_amp_priors
@@ -91,18 +92,12 @@ class nsgpVI(tf.Module):
         learning_rate = tf.keras.optimizers.schedules.CosineDecayRestarts(initial_learning_rate, steps_per_epoch, m_mul=0.5)
 
         
-        #tf.optimizers.schedules.ExponentialDecay(initial_learning_rate=initial_learning_rate, decay_steps=steps_per_epoch, decay_rate=0.99,staircase=True)
-        optimizer = tf.keras.optimizers.RMSprop(learning_rate=learning_rate,momentum=0.0)#False,epsilon=1e-03)
-        #optimizer = tf.keras.optimizers.Adadelta(learning_rate=initial_learning_rate)
-
-        #optimizer = tf.keras.optimizers.Nadam(learning_rate=initial_learning_rate)#, beta_1=0.0, beta_2=0.6, epsilon=1e-1, amsgrad=False)
-
-        accumulator = GradientAccumulator()
+        optimizer = tf.keras.optimizers.RMSprop(learning_rate=0.01,momentum=0.0)#False,epsilon=1e-03)
+        optimizer1 = tf.keras.optimizers.RMSprop(learning_rate=0.01,momentum=0.0)#False,epsilon=1e-03)
 
         def train_step(inputs):
             t_train_batch, x_train_batch, predictor_batch = inputs
             kl_weight = tf.reduce_sum(tf.ones_like(t_train_batch))/self.num_training_points
-
             with tf.GradientTape(watch_accessed_variables=True) as tape:
                 loss = self.variational_loss(locations=x_train_batch,time_points=t_train_batch,predictor_values=predictor_batch, kl_weight=kl_weight) 
             grads = tape.gradient(loss, self.trainable_variables)
@@ -113,26 +108,39 @@ class nsgpVI(tf.Module):
             per_replica_losses, per_replica_grads = strategy.run(train_step, args=(dataset_inputs,))
             return strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None), strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_grads, axis=None)
 
+        def train_step1(inputs):
+            t_train_batch, x_train_batch, predictor_batch = inputs
+            kl_weight = tf.reduce_sum(tf.ones_like(t_train_batch))/self.num_training_points
+            with tf.GradientTape(watch_accessed_variables=False) as tape:
+                tape.watch(self.vi_param_list)
+                loss = self.variational_loss(locations=x_train_batch,time_points=t_train_batch,predictor_values=predictor_batch, kl_weight=kl_weight) 
+            grads = tape.gradient(loss, self.vi_param_list)
+            return loss, grads
+
+        @tf.function
+        def distributed_train_step1(dataset_inputs):
+            per_replica_losses, per_replica_grads = strategy.run(train_step1, args=(dataset_inputs,))
+            return strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None), strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_grads, axis=None)
+        
         pbar = tqdm(range(NUM_EPOCHS))
         loss_history = np.zeros((NUM_EPOCHS))
         len_history = np.zeros((NUM_EPOCHS))
 
-
+        vi_params = True
         for i in pbar:
             batch_count=0    
             epoch_loss = 0.0
             for batch in self.dataset:
-                batch_loss = 0.0
-                for s in range(self.num_sequential_samples):
+                
+                if vi_params:
+                    loss, grads = distributed_train_step1(batch)
+                    batch_loss = loss.numpy()
+                    optimizer1.apply_gradients(zip(grads, self.vi_param_list))
+                else:
                     loss, grads = distributed_train_step(batch)
-                    # accumulate the loss and gradient
-                    accumulator(grads)
-                    batch_loss += loss.numpy()
-               
-                grads = accumulator.gradients
-                optimizer.apply_gradients(zip(grads, self.trainable_variables))
-                batch_loss/=self.num_sequential_samples
-                accumulator.reset()
+                    batch_loss = loss.numpy()
+                    optimizer.apply_gradients(zip(grads, self.trainable_variables))
+
                     
                 epoch_loss+=batch_loss
                 batch_count+=batch[0].shape[0]
@@ -141,6 +149,7 @@ class nsgpVI(tf.Module):
             loss_history[i] = epoch_loss/batch_count
             len_history[i] = self.kernel_len.length_scale.numpy()
             #print(epoch_loss)
+            vi_params = not vi_params
 
         return loss_history, len_history
 
@@ -179,7 +188,7 @@ class nsgpVI(tf.Module):
     
         len_samples,amp_samples = tf.split(samples,NUM_LATENT,axis=2)
         
-        return tf.math.softplus(self.mean_len + len_samples), tf.math.softplus(self.mean_amp + amp_samples)
+        return tf.math.exp(self.mean_len + len_samples), tf.math.exp(self.mean_amp + amp_samples)
     
     def get_conditional(self, X):
         
