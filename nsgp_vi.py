@@ -80,16 +80,19 @@ class nsgpVI(tf.Module):
         self.num_training_points=num_training_points
         
 
-    def optimize(self, BATCH_SIZE, SEG_LENGTH, NUM_EPOCHS=100):
+    def optimize(self, BATCH_SIZE, SEG_LENGTH, NUM_EPOCHS=100, lr=1e-2):
 
 
         strategy = tf.distribute.MirroredStrategy()
         dist_dataset = strategy.experimental_distribute_dataset(self.dataset)
 
-        initial_learning_rate = 1e-2
+        initial_learning_rate = lr
         steps_per_epoch = self.num_training_points//(BATCH_SIZE*SEG_LENGTH)
-        learning_rate = tf.optimizers.schedules.ExponentialDecay(initial_learning_rate=initial_learning_rate,decay_steps=steps_per_epoch,decay_rate=0.99,staircase=True)
-        optimizer = tf.keras.optimizers.RMSprop(learning_rate=initial_learning_rate,centered=False,epsilon=1e-03)
+        learning_rate = tf.keras.optimizers.schedules.CosineDecayRestarts(initial_learning_rate, steps_per_epoch, m_mul=0.5)
+
+        
+        #tf.optimizers.schedules.ExponentialDecay(initial_learning_rate=initial_learning_rate, decay_steps=steps_per_epoch, decay_rate=0.99,staircase=True)
+        optimizer = tf.keras.optimizers.RMSprop(learning_rate=learning_rate,momentum=0.0)#False,epsilon=1e-03)
         #optimizer = tf.keras.optimizers.Adadelta(learning_rate=initial_learning_rate)
 
         #optimizer = tf.keras.optimizers.Nadam(learning_rate=initial_learning_rate)#, beta_1=0.0, beta_2=0.6, epsilon=1e-1, amsgrad=False)
@@ -176,7 +179,7 @@ class nsgpVI(tf.Module):
     
         len_samples,amp_samples = tf.split(samples,NUM_LATENT,axis=2)
         
-        return tf.math.exp(self.mean_len + len_samples), tf.math.exp(self.mean_amp + amp_samples)
+        return tf.math.softplus(self.mean_len + len_samples), tf.math.softplus(self.mean_amp + amp_samples)
     
     def get_conditional(self, X):
         
