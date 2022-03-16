@@ -32,7 +32,7 @@ NUM_LATENT = 2
 
 class nsgpVI(tf.Module):
                                         
-    def __init__(self,kernel_len,kernel_amp,n_inducing_points,inducing_index_points,dataset,num_training_points, init_observation_noise_variance=1e-2,num_sequential_samples=10,num_parallel_samples=10,kernel_len_priors=None,kernel_amp_priors=None,obs_noise_prior=None,jitter=1e-6,mean_len=0,mean_amp=0):
+    def __init__(self,kernel_len,kernel_amp,n_inducing_points,inducing_index_points,dataset,num_training_points,segment_length, init_observation_noise_variance=1e-2,num_sequential_samples=10,num_parallel_samples=10,kernel_len_priors=None,kernel_amp_priors=None,obs_noise_prior=None,jitter=1e-6,mean_len=0,mean_amp=0):
                
         self.jitter=jitter
         
@@ -79,17 +79,29 @@ class nsgpVI(tf.Module):
         
         self.dataset = dataset
         self.num_training_points=num_training_points
+        n = segment_length-1
+        # lower triangular matrix for calculating sums of matrix 
+        self.LT = tfp.math.fill_triangular(tf.ones(n * (n+1) // 2, dtype=tf.float64))
+        
+        # noise matrix has a specific form based on the summation that is involved in the covariance matrix calc
+        self.noise_matrix = tf.zeros((n,n), dtype=tf.float64)
+        diag_part = 2.*np.ones(n)
+        diag_part[0]=1.
+        off_diag_part = -1.*np.ones(n-1)
+        self.noise_matrix = tf.linalg.set_diag(self.noise_matrix,diag_part)
+        self.noise_matrix = tf.linalg.set_diag(self.noise_matrix,off_diag_part,k=1)
+        self.noise_matrix = tf.linalg.set_diag(self.noise_matrix,off_diag_part,k=-1)
         
 
-    def optimize(self, BATCH_SIZE, SEG_LENGTH, NUM_EPOCHS=100, lr=1e-2):
+    def optimize(self, BATCH_SIZE,  NUM_EPOCHS=100, lr=1e-2):
 
 
         strategy = tf.distribute.MirroredStrategy()
         dist_dataset = strategy.experimental_distribute_dataset(self.dataset)
 
         initial_learning_rate = lr
-        steps_per_epoch = self.num_training_points//(BATCH_SIZE*SEG_LENGTH)
-        learning_rate = tf.keras.optimizers.schedules.CosineDecayRestarts(initial_learning_rate, steps_per_epoch, m_mul=0.5)
+        #steps_per_epoch = self.num_training_points//(BATCH_SIZE*SEG_LENGTH)
+        #learning_rate = tf.keras.optimizers.schedules.CosineDecayRestarts(initial_learning_rate, steps_per_epoch, m_mul=0.5)
 
         
         optimizer = tf.keras.optimizers.RMSprop(learning_rate=0.01,momentum=0.0)#False,epsilon=1e-03)
@@ -141,7 +153,7 @@ class nsgpVI(tf.Module):
                     batch_loss = loss.numpy()
                     optimizer.apply_gradients(zip(grads, self.trainable_variables))
 
-                    
+                vi_params = not vi_params        
                 epoch_loss+=batch_loss
                 batch_count+=batch[0].shape[0]
                 #pbar.set_description("Loss %f" % (epoch_loss/batch_count))
@@ -149,7 +161,7 @@ class nsgpVI(tf.Module):
             loss_history[i] = epoch_loss/batch_count
             len_history[i] = self.kernel_len.length_scale.numpy()
             #print(epoch_loss)
-            vi_params = not vi_params
+            
 
         return loss_history, len_history
 
@@ -171,14 +183,15 @@ class nsgpVI(tf.Module):
     def surrogate_posterior_expected_log_likelihood(self,locations,time_points,predictor_values):
 
         len_vals, amp_vals = self.get_samples(predictor_values,S=self.num_parallel_samples)   
-        K = self.non_stat_vel(time_points, len_vals, amp_vals) # BxNxN
-        K = K + (tf.eye(tf.shape(K)[-1], dtype=tf.float64) * ((self.obs_max * tf.nn.sigmoid(self.vgp_observation_noise_variance))+self.jitter))
+        L = self.non_stat_vel(time_points, len_vals, amp_vals, tf.nn.softplus(self.vgp_observation_noise_variance)) # BxNxN
+        #K = self.non_stat_vel(time_points, len_vals, amp_vals) # BxNxN
+        #K = K + (tf.eye(tf.shape(K)[-1], dtype=tf.float64) * ((self.obs_max * tf.nn.sigmoid(self.vgp_observation_noise_variance))+self.jitter))
 
         
         centered_locations = locations[...,1:,:]-locations[...,0,None,:] #centered observations
 
-        logpdf_K_x = tf.reduce_sum(tf.reduce_mean(tfd.MultivariateNormalTriL(scale_tril = tf.linalg.cholesky(K)).log_prob((centered_locations[...,0])),axis=0))
-        logpdf_K_y = tf.reduce_sum(tf.reduce_mean(tfd.MultivariateNormalTriL(scale_tril = tf.linalg.cholesky(K)).log_prob((centered_locations[...,1])),axis=0))
+        logpdf_K_x = tf.reduce_sum(tf.reduce_mean(tfd.MultivariateNormalTriL(scale_tril = L).log_prob((centered_locations[...,0])),axis=0))
+        logpdf_K_y = tf.reduce_sum(tf.reduce_mean(tfd.MultivariateNormalTriL(scale_tril = L).log_prob((centered_locations[...,1])),axis=0))
         
         return logpdf_K_x + logpdf_K_y    
     
@@ -252,7 +265,49 @@ class nsgpVI(tf.Module):
         samples = tf.expand_dims(mean,0) + tf.matmul(chol, z)#[:, :, :, 0]  # BSN1
         return samples
 
-    def non_stat_vel(self,T,lengthscales, var):
+    def non_stat_vel(self,T,lengthscales, var, obs_noise):
+        
+        """Non-stationary integrated Matern12 kernel"""
+        stddev = tf.math.sqrt(var)
+        #sigma_ = 0.5*(stddev[...,:-1,0,None] + stddev[...,1:,0,None])
+        #len_ = 0.5*(lengthscales[...,:-1,0,None] + lengthscales[...,1:,0,None])
+        sigma_ = stddev[...,0,None]# + stddev[...,1:,0,None])
+        len_ = lengthscales[...,0,None]# + lengthscales[...,1:,0,None])
+
+        Ls = tf.square(len_)
+
+        L = tf.math.sqrt(0.5*(Ls + tf.linalg.matrix_transpose(Ls)))
+
+        prefactL = tf.math.sqrt(tf.matmul(len_, len_, transpose_b=True))
+        prefactV = tf.matmul(sigma_, sigma_,transpose_b=True)
+
+        zeta = tf.math.multiply(prefactV,tf.math.divide(prefactL,L))
+
+
+        tpq1 = tf.math.exp(tf.math.divide(-tf.math.abs(tf.linalg.matrix_transpose(T[:,:-1]) - T[:,1:]),L))
+        tp1q1 = tf.math.exp(tf.math.divide(-tf.math.abs(tf.linalg.matrix_transpose(T[:,1:]) - T[:,1:]),L))
+        tpq = tf.math.exp(tf.math.divide(-tf.math.abs(tf.linalg.matrix_transpose(T[:,:-1]) - T[:,:-1]),L))
+        tp1q = tf.math.exp(tf.math.divide(-tf.math.abs(tf.linalg.matrix_transpose(T[:,1:]) - T[:,:-1]),L))
+
+
+        Epq_grid = tpq1-tp1q1-tpq+tp1q
+        Epq_grid = (L**2)*Epq_grid
+
+        Epq_grid = tf.linalg.set_diag(Epq_grid,(tf.linalg.diag_part(Epq_grid)) + 2.0*len_[...,0]*((T[:,1:,0])-(T[:,:-1,0])))
+        Epq_grid = zeta*Epq_grid
+
+
+        
+
+        M = Epq_grid + self.noise_matrix*obs_noise
+
+        cholesky_factor = tf.linalg.matmul(self.LT,tf.linalg.cholesky(M))
+
+        #K = tf.math.cumsum(tf.math.cumsum(Epq_grid,axis=-2,exclusive=False),axis=-1,exclusive=False)
+        
+        return cholesky_factor
+
+    def non_stat_vel2(self,T,lengthscales, var):
         
         """Non-stationary integrated Matern12 kernel"""
         stddev = tf.math.sqrt(var)
