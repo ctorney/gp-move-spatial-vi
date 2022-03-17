@@ -39,14 +39,14 @@ class nsgpVI(tf.Module):
         self.jitter=jitter
         self.num_covars = num_covars
         
-        self.mean_len = tf.Variable([0.0], dtype=tf.float64, name='len_mean', trainable=0)
-        self.mean_amp = tf.Variable([0.0], dtype=tf.float64, name='var_mean', trainable=0)
+        self.mean_len = tf.Variable([0.0], dtype=tf.float64, name='len_mean', trainable=1)
+        self.mean_amp = tf.Variable([0.0], dtype=tf.float64, name='var_mean', trainable=1)
         
         self.beta_len_mean = tf.Variable(np.zeros(self.num_covars), dtype=tf.float64, name='beta_len_mean',trainable=1)
         self.beta_amp_mean = tf.Variable(np.zeros(self.num_covars), dtype=tf.float64, name='beta_amp_mean',trainable=1)
         
-        self.beta_len_std = tfp.util.TransformedVariable(1e-0*np.ones(self.num_covars),tfb.Softplus(), dtype=tf.float64, name='beta_len_std',trainable=1)
-        self.beta_amp_std = tfp.util.TransformedVariable(1e-0*np.ones(self.num_covars),tfb.Softplus(), dtype=tf.float64, name='beta_amp_std',trainable=1)
+        self.beta_len_std = tfp.util.TransformedVariable(np.ones(self.num_covars),tfb.Softplus(), dtype=tf.float64, name='beta_len_std',trainable=1)
+        self.beta_amp_std = tfp.util.TransformedVariable(np.ones(self.num_covars),tfb.Softplus(), dtype=tf.float64, name='beta_amp_std',trainable=1)
         
         self.inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='ind_points',trainable=1) #z's for lower level functions
 
@@ -54,10 +54,10 @@ class nsgpVI(tf.Module):
         self.kernel_amp = kernel_amp
         
         #parameters for variational distribution for len,phi(l_z) and var,phi(sigma_z)
-        self.q_mu = tf.Variable(np.zeros((NUM_LATENT*n_inducing_points),dtype=dtype),name='ind_loc_post', trainable=1)
-        self.len_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='len_scale_post', trainable=1)
-        self.amp_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='amp_scale_post', trainable=1)
-        self.cc_scale = tf.Variable([np.zeros((n_inducing_points),dtype=dtype)],name='cc_scale',trainable=1)
+        self.q_mu = tf.Variable(np.zeros((NUM_LATENT*n_inducing_points),dtype=dtype),name='ind_loc_post', trainable=0)
+        self.len_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='len_scale_post', trainable=0)
+        self.amp_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='amp_scale_post', trainable=0)
+        self.cc_scale = tf.Variable([np.zeros((n_inducing_points),dtype=dtype)],name='cc_scale',trainable=0)
 
         len_op = tf.linalg.LinearOperatorLowerTriangular(self.len_scale)
         amp_op = tf.linalg.LinearOperatorLowerTriangular(self.amp_scale)
@@ -82,7 +82,7 @@ class nsgpVI(tf.Module):
 #         self.kernel_amp_priors = kernel_amp_priors
         self.obs_noise_prior = obs_noise_prior
         
-        self.vi_param_list = None#[self.q_mu, self.len_scale.non_trainable_variables[0], self.amp_scale.non_trainable_variables[0], self.cc_scale] 
+        self.vi_param_list = [self.q_mu, self.len_scale.non_trainable_variables[0], self.amp_scale.non_trainable_variables[0], self.cc_scale] 
 
         #self.obs_max = tf.Variable([0.01], dtype=tf.float64, name='obs_max', trainable=False)
         
@@ -170,15 +170,19 @@ class nsgpVI(tf.Module):
                 except KeyboardInterrupt:
                     raise
                 except:
-                    raise#pass
-                #vi_params = not vi_params
+                    pass
+                vi_params = not vi_params
 
                     
                 epoch_loss+=batch_loss
                 batch_count+=batch[0].shape[0]
                 #pbar.set_description("Loss %f" % (epoch_loss/batch_count))
                 #pbar.set_description("Loss %f, klen_l %f, kamp_l %f, obs %f" % (epoch_loss/batch_count, self.kernel_len.length_scale.numpy(), self.kernel_amp.length_scale.numpy(),(self.obs_max*tf.nn.sigmoid(self.vgp_observation_noise_variance)).numpy()))
-                pbar.set_description("Loss %f, klen_l %f, kamp_l %f, obs %f" % (epoch_loss/batch_count, self.kernel_len.length_scale.numpy(), self.kernel_amp.length_scale.numpy(),(tf.nn.softplus(self.vgp_observation_noise_variance)).numpy()))
+                
+                if i>0:
+                    pbar.set_description("Loss %f, klen_l %f, kamp_l %f, obs %f" % (loss_history[i-1], self.kernel_len.length_scale.numpy(), self.kernel_amp.length_scale.numpy(),(tf.nn.softplus(self.vgp_observation_noise_variance)).numpy()))
+                else:
+                    pbar.set_description("Loss %f, klen_l %f, kamp_l %f, obs %f" % (epoch_loss/batch_count, self.kernel_len.length_scale.numpy(), self.kernel_amp.length_scale.numpy(),(tf.nn.softplus(self.vgp_observation_noise_variance)).numpy()))
             loss_history[i] = epoch_loss/batch_count
             #print(epoch_loss)
 
@@ -197,11 +201,11 @@ class nsgpVI(tf.Module):
         
         penalty = 2.0*kullback_leibler.kl_divergence(self.variational_inducing_observations_posterior,self.inducing_prior) 
         
-        penalty += tf.reduce_sum(tfp.distributions.kl_divergence(tfp.distributions.Normal(loc=self.beta_len_mean,scale=self.beta_len_std),self.beta_len_prior))
-        penalty += tf.reduce_sum(tfp.distributions.kl_divergence(tfp.distributions.Normal(loc=self.beta_amp_mean,scale=self.beta_amp_std),self.beta_amp_prior))
+        penalty += 2.0*tf.reduce_sum(tfp.distributions.kl_divergence(tfp.distributions.Normal(loc=self.beta_len_mean,scale=self.beta_len_std),self.beta_len_prior))
+        penalty += 2.0*tf.reduce_sum(tfp.distributions.kl_divergence(tfp.distributions.Normal(loc=self.beta_amp_mean,scale=self.beta_amp_std),self.beta_amp_prior))
 
-        if self.obs_noise_prior is not None:
-            penalty += self.obs_noise_prior.log_prob(self.vgp_observation_noise_variance)
+        #if self.obs_noise_prior is not None:
+        #   penalty += 2.0*self.obs_noise_prior.log_prob(self.vgp_observation_noise_variance)
 
         return penalty
 
