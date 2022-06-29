@@ -21,7 +21,7 @@ from tqdm import tqdm
 
 from tensorflow_probability.python.distributions import kullback_leibler
 
-from utils.gradient_accumulator import GradientAccumulator
+#from utils.gradient_accumulator import GradientAccumulator
 
 tfb = tfp.bijectors
 tfd = tfp.distributions
@@ -32,28 +32,22 @@ NUM_LATENT = 2
 
 class nsgpVI(tf.Module):
                                         
-    def __init__(self,kernel_len,kernel_amp,n_inducing_points,inducing_index_points,dataset,num_training_points,segment_length, init_observation_noise_variance=1e-2,num_sequential_samples=10,num_parallel_samples=10,kernel_len_priors=None,kernel_amp_priors=None,obs_noise_prior=None,jitter=1e-6,mean_len=0,mean_amp=0):
+    def __init__(self,kernel_len,kernel_amp,n_inducing_points,inducing_index_points,dataset,num_training_points,segment_length, num_sequential_samples=10,num_parallel_samples=10,jitter=1e-6,mean_len=0,mean_amp=0):
                
         self.jitter=jitter
         
-        #self.L = domain_size
-        self.mean_len = tf.Variable([mean_len], dtype=tf.float64, name='len_mean', trainable=1)
-        self.mean_amp = tf.Variable([mean_amp], dtype=tf.float64, name='var_mean', trainable=1)
-        self.inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='ind_points',trainable=1) #z's for lower level functions
+        self.mean_len = tf.Variable([0.0], dtype=tf.float64, name='len_mean', trainable=1)
+        self.mean_amp = tf.Variable([0.0], dtype=tf.float64, name='var_mean', trainable=1)
+        self.inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='ind_points',trainable=0) #z's for lower level functions
 
         self.kernel_len = kernel_len
         self.kernel_amp = kernel_amp
         
         #parameters for variational distribution for len,phi(l_z) and var,phi(sigma_z)
         self.q_mu = tf.Variable(np.zeros((NUM_LATENT*n_inducing_points),dtype=dtype),name='ind_loc_post', trainable=0)
-        self.len_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='len_scale_post', trainable=0)
-        self.amp_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='amp_scale_post', trainable=0)
-        self.cc_scale = tf.Variable([np.zeros((n_inducing_points),dtype=dtype)],name='cc_scale',trainable=0)
-
-        len_op = tf.linalg.LinearOperatorLowerTriangular(self.len_scale)
-        amp_op = tf.linalg.LinearOperatorLowerTriangular(self.amp_scale)
-        cc_op = tf.linalg.LinearOperatorDiag(self.cc_scale)
-        self.q_sqrt = tf.linalg.LinearOperatorBlockLowerTriangular([[len_op],[cc_op,amp_op]])    
+        self.q_scale = tfp.util.TransformedVariable([np.eye(NUM_LATENT*n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='len_scale_post', trainable=0)
+        
+        self.q_sqrt = tf.linalg.LinearOperatorLowerTriangular(self.q_scale)
         #approximation to the posterior: phi(l_z)
         self.variational_inducing_observations_posterior = tfd.MultivariateNormalLinearOperator(
                                                                       loc=self.q_mu,
@@ -63,14 +57,7 @@ class nsgpVI(tf.Module):
         self.inducing_prior = tfd.MultivariateNormalDiag(loc=tf.zeros((NUM_LATENT*n_inducing_points),dtype=tf.float64),name='ind_prior')
         self.M = n_inducing_points
         
-        self.vi_param_list = [self.q_mu, self.len_scale.non_trainable_variables[0], self.amp_scale.non_trainable_variables[0], self.cc_scale] 
-        
-        self.kernel_len_priors = kernel_len_priors
-        self.kernel_amp_priors = kernel_amp_priors
-        self.obs_noise_prior = obs_noise_prior
-        
-        
-        self.obs_max = tf.Variable([0.01], dtype=tf.float64, name='obs_max', trainable=False)
+        self.vi_param_list = [self.inducing_index_points, self.q_mu, self.q_scale.non_trainable_variables[0]]# self.amp_scale.non_trainable_variables[0]], self.cc_scale] 
         
         self.vgp_observation_noise_variance = tf.Variable(0.0,dtype=dtype,name='nv', trainable=1)
 
@@ -93,75 +80,155 @@ class nsgpVI(tf.Module):
         self.noise_matrix = tf.linalg.set_diag(self.noise_matrix,off_diag_part,k=-1)
         
 
-    def optimize(self, BATCH_SIZE,  NUM_EPOCHS=100, lr=1e-2):
-
-
-        strategy = tf.distribute.MirroredStrategy()
-        dist_dataset = strategy.experimental_distribute_dataset(self.dataset)
-
-        initial_learning_rate = lr
-        #steps_per_epoch = self.num_training_points//(BATCH_SIZE*SEG_LENGTH)
-        #learning_rate = tf.keras.optimizers.schedules.CosineDecayRestarts(initial_learning_rate, steps_per_epoch, m_mul=0.5)
-
+    
+    def optimize(self, BATCH_SIZE,  MAX_ITERS=100, lr=1e-2, window=100):
+        m_optimizer =  tf.keras.optimizers.Adam(learning_rate=lr)#,momentum=0.0)#False,epsilon=1e-03)#
+        e_optimizer =  tf.keras.optimizers.Adam(learning_rate=lr)#,momentum=0.0)#False,epsilon=1e-03)#
         
-        optimizer = tf.keras.optimizers.RMSprop(learning_rate=0.01,momentum=0.0)#False,epsilon=1e-03)
-        optimizer1 = tf.keras.optimizers.RMSprop(learning_rate=0.01,momentum=0.0)#False,epsilon=1e-03)
-
-        def train_step(inputs):
+        psrf_limit = 0.01
+        
+        def compute_psrf(previous_window,current_window):
+            decrease = np.median(np.array(previous_window)) - np.median(np.array(current_window))
+            #print(np.mean(np.array(previous_window)))
+            #print(np.mean(np.array(current_window)))
+            return decrease
+            np.mean(np.array(current_window))
+            for i in range(len(previous_window[0])):
+                previous_param = np.array([pw[i] for pw in previous_window]).reshape(len(previous_window),-1)
+                current_param = np.array([cw[i] for cw in current_window]).reshape(len(current_window),-1)
+                rhat = tf.math.reduce_max(tfp.mcmc.diagnostic.potential_scale_reduction(np.stack((current_param,previous_param),axis=1), independent_chain_ndims=1)).numpy()
+                print(rhat)
+                if rhat>psrf_limit:
+                    return rhat
+            return rhat
+                                                    
+        @tf.function
+        def m_train_step(inputs):
             t_train_batch, x_train_batch, predictor_batch = inputs
             kl_weight = tf.reduce_sum(tf.ones_like(t_train_batch))/self.num_training_points
             with tf.GradientTape(watch_accessed_variables=True) as tape:
                 loss = self.variational_loss(locations=x_train_batch,time_points=t_train_batch,predictor_values=predictor_batch, kl_weight=kl_weight) 
             grads = tape.gradient(loss, self.trainable_variables)
-            return loss, grads
-
+            m_optimizer.apply_gradients(zip(grads, self.trainable_variables))
+            return loss
+        
         @tf.function
-        def distributed_train_step(dataset_inputs):
-            per_replica_losses, per_replica_grads = strategy.run(train_step, args=(dataset_inputs,))
-            return strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None), strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_grads, axis=None)
-
-        def train_step1(inputs):
+        def e_train_step(inputs):
             t_train_batch, x_train_batch, predictor_batch = inputs
             kl_weight = tf.reduce_sum(tf.ones_like(t_train_batch))/self.num_training_points
             with tf.GradientTape(watch_accessed_variables=False) as tape:
                 tape.watch(self.vi_param_list)
                 loss = self.variational_loss(locations=x_train_batch,time_points=t_train_batch,predictor_values=predictor_batch, kl_weight=kl_weight) 
             grads = tape.gradient(loss, self.vi_param_list)
-            return loss, grads
-
-        @tf.function
-        def distributed_train_step1(dataset_inputs):
-            per_replica_losses, per_replica_grads = strategy.run(train_step1, args=(dataset_inputs,))
-            return strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None), strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_grads, axis=None)
+            e_optimizer.apply_gradients(zip(grads, self.vi_param_list))
+            return loss
         
-        pbar = tqdm(range(NUM_EPOCHS))
-        loss_history = np.zeros((NUM_EPOCHS))
-        len_history = np.zeros((NUM_EPOCHS))
-
-        vi_params = True
+        pbar = tqdm(range(MAX_ITERS))
+        loss_history = []#np.zeros((MAX_ITERS))
+        len_history = []#np.zeros((MAX_ITERS))
+        
         for i in pbar:
+            epoch_loss = 0
+            batch_count=0    
+            
+            window_count = 0
+            previous_window = None
+            previous_window_loss = None
+            current_window = []
+            current_window_loss = []
+
+            # run until convergence
+            convergence = False
+            first_run = True
+            psrf = 0.0
+            while not convergence:
+                
+                for batch in self.dataset:
+                    batch_loss = e_train_step(batch).numpy()
+                    batch_loss = m_train_step(batch).numpy()
+                    epoch_loss += batch_loss
+                    batch_count+=batch[0].shape[0]
+                    pbar.set_description("Loss %f, window %d, mean %f, klen_l %f, kamp_l %f, obs %f" % (epoch_loss/batch_count, window_count,psrf,self.kernel_len.length_scale.numpy(), self.kernel_amp.length_scale.numpy(),(tf.nn.softplus(self.vgp_observation_noise_variance)).numpy()))
+                    param_list = []
+                    for param in self.vi_param_list:
+                        param_list.append(param.numpy())
+                    #current_window.append(param_list)
+                    #param_list = []
+                    for param in self.trainable_variables:
+                        param_list.append(param.numpy())
+                    current_window.append(param_list)
+                    current_window_loss.append([batch_loss/batch[0].shape[0]])
+                    loss_history.append(batch_loss/batch[0].shape[0])
+
+                    window_count+=1
+                    if window_count == window:
+                        if previous_window is not None:
+                            #return previous_window_loss,current_window_loss
+                            psrf = compute_psrf(previous_window_loss,current_window_loss)
+                            if psrf <= psrf_limit:
+                                for i in range(len(self.vi_param_list)):
+                                    self.vi_param_list[i].assign(np.mean(np.array([cw[i] for cw in current_window]),axis=0))
+                                for i in range(len(self.vi_param_list), len(self.vi_param_list)+len(self.trainable_variables)):
+                                    self.trainable_variables[i-len(self.vi_param_list)].assign(np.mean(np.array([cw[i] for cw in current_window]),axis=0))
+
+                                #if (first_run) and (psrf_limit<2): 
+                                #    return loss_history[:i+1],len_history[:i+1]
+                                convergence = True
+                                break
+                            #first_run = False
+                        previous_window = current_window
+                        previous_window_loss = current_window_loss
+                        current_window = []
+                        current_window_loss = []
+                        window_count = 0
+                
+            return loss_history, len_history#[:i+1]
             batch_count=0    
             epoch_loss = 0.0
-            for batch in self.dataset:
-                
-                if vi_params:
-                    loss, grads = distributed_train_step1(batch)
-                    batch_loss = loss.numpy()
-                    optimizer1.apply_gradients(zip(grads, self.vi_param_list))
-                else:
-                    loss, grads = distributed_train_step(batch)
-                    batch_loss = loss.numpy()
-                    optimizer.apply_gradients(zip(grads, self.trainable_variables))
-
-                vi_params = not vi_params        
-                epoch_loss+=batch_loss
-                batch_count+=batch[0].shape[0]
-                #pbar.set_description("Loss %f" % (epoch_loss/batch_count))
-                pbar.set_description("Loss %f, klen_l %f, kamp_l %f, obs %f" % (epoch_loss/batch_count, self.kernel_len.length_scale.numpy(), self.kernel_amp.length_scale.numpy(),(self.obs_max*tf.nn.sigmoid(self.vgp_observation_noise_variance)).numpy()))
-            loss_history[i] = epoch_loss/batch_count
-            len_history[i] = self.kernel_len.length_scale.numpy()
-            #print(epoch_loss)
             
+            window_count = 0
+            previous_window = None
+            current_window = []
+
+            # run until convergence
+            convergence = False
+            while not convergence:
+                
+                for batch in self.dataset:
+                    batch_loss = m_train_step(batch).numpy()
+                    epoch_loss += batch_loss
+                    batch_count+=batch[0].shape[0]
+                    pbar.set_description("Loss %f, mean %f %f, klen_l %f, kamp_l %f, obs %f" % (epoch_loss/batch_count, self.mean_len.numpy(),self.mean_amp.numpy(),self.kernel_len.length_scale.numpy(), self.kernel_amp.length_scale.numpy(),(tf.nn.softplus(self.vgp_observation_noise_variance)).numpy()))
+            
+                    param_list = []
+                    for param in self.trainable_variables:
+                        param_list.append(param.numpy())
+                    current_window.append(param_list)
+
+                    window_count+=1
+                    if window_count == window:
+                        if previous_window is not None:
+                            #return previous_window,current_window
+                            psrf = compute_psrf(previous_window,current_window)
+                            if psrf <= 1.2:
+                                for i in range(len(self.trainable_variables)):
+                                    self.trainable_variables[i].assign(np.mean(np.array([cw[i] for cw in current_window]),axis=0))
+
+                                convergence = True
+                                break
+                        previous_window = current_window
+                        current_window = []
+                        window_count = 0
+            
+            loss_history[i] =epoch_loss/batch_count
+            len_history[i] = self.kernel_len.length_scale.numpy()
+            
+            #if (stopping_interval is not None) and (i > evaluation_interval):
+            #    recent_median_loss = np.median(loss_history[i:0:-1][:stopping_interval])
+            #    evaluation_median_loss = np.median(loss_history[i:0:-1][:evaluation_interval])
+            #    if evaluation_median_loss - recent_median_loss < stopping_threshold:
+            #        return loss_history[:i+1],len_history[:i+1]
+            psrf_limit /= 2.0
 
         return loss_history, len_history
 
@@ -176,7 +243,7 @@ class nsgpVI(tf.Module):
     
     def penalty(self):
         
-        penalty = 2.0*kullback_leibler.kl_divergence(self.variational_inducing_observations_posterior,self.inducing_prior) 
+        penalty = kullback_leibler.kl_divergence(self.variational_inducing_observations_posterior,self.inducing_prior) 
         
         return penalty
 
