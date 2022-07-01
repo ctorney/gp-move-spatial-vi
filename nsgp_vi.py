@@ -30,7 +30,9 @@ NUM_LATENT = 2
 
 class nsgpVI(tf.Module):
                                         
-    def __init__(self,kernel_len,kernel_amp,n_inducing_points,inducing_index_points,dataset,num_training_points,segment_length, num_sequential_samples=10,num_parallel_samples=10,jitter=1e-6):
+    def __init__(self,kernel_len,kernel_amp,n_inducing_points,inducing_index_points,dataset,num_training_points,segment_length,
+                    init_observation_noise_variance=0.0,num_sequential_samples=10,num_parallel_samples=10,jitter=1e-6):
+
                
         self.jitter=jitter
         
@@ -57,7 +59,7 @@ class nsgpVI(tf.Module):
         
         self.vi_param_list = [self.q_mu, self.q_scale.non_trainable_variables[0]]
         
-        self.vgp_observation_noise_variance = tf.Variable(0.0,dtype=dtype,name='nv', trainable=1)
+        self.vgp_observation_noise_variance = tf.Variable(init_observation_noise_variance,dtype=dtype,name='nv', trainable=1)
 
         self.num_sequential_samples=num_sequential_samples
         self.num_parallel_samples=num_parallel_samples
@@ -141,8 +143,9 @@ class nsgpVI(tf.Module):
             if threshold is None:
                 continue
             if previous_window is not None:
-                
-                decrease = np.median(np.array(previous_window_loss)) - np.median(np.array(current_window_loss))
+                #print(patience_count)
+                #print(np.mean(np.array(previous_window_loss)),np.mean(np.array(current_window_loss)))
+                decrease = np.mean(np.array(previous_window_loss)) - np.mean(np.array(current_window_loss))
                 if decrease <= threshold:
                     patience_count-=1
                 else:
@@ -150,10 +153,10 @@ class nsgpVI(tf.Module):
                 if patience_count==0:
                     break
             
-        for i in range(len(self.vi_param_list)):
-            self.vi_param_list[i].assign(np.mean(np.array([cw[i] for cw in current_window]),axis=0))
-        for i in range(len(self.vi_param_list), len(self.vi_param_list)+len(self.trainable_variables)):
-            self.trainable_variables[i-len(self.vi_param_list)].assign(np.mean(np.array([cw[i] for cw in current_window]),axis=0))
+        #for i in range(len(self.vi_param_list)):
+        #    self.vi_param_list[i].assign(np.mean(np.array([cw[i] for cw in current_window]),axis=0))
+        #for i in range(len(self.vi_param_list), len(self.vi_param_list)+len(self.trainable_variables)):
+        #    self.trainable_variables[i-len(self.vi_param_list)].assign(np.mean(np.array([cw[i] for cw in current_window]),axis=0))
         return loss_history
 
 
