@@ -21,8 +21,6 @@ from tqdm import tqdm
 
 from tensorflow_probability.python.distributions import kullback_leibler
 
-from utils.gradient_accumulator import GradientAccumulator
-
 tfb = tfp.bijectors
 tfd = tfp.distributions
 tfk = tfp.math.psd_kernels
@@ -34,7 +32,7 @@ class nsgpVI(tf.Module):
                                         
     def __init__(self,kernel_len,kernel_amp,n_inducing_points,inducing_index_points,dataset,num_training_points,
                  num_covars,prior_beta_len_means,prior_beta_amp_means,prior_beta_len_std,prior_beta_amp_std, segment_length,
-                 init_observation_noise_variance=1e-2,num_sequential_samples=10,num_parallel_samples=10,obs_noise_prior=None,jitter=1e-6):
+                init_observation_noise_variance=0.0,num_sequential_samples=10,num_parallel_samples=10,jitter=1e-6):
                
         self.jitter=jitter
         self.num_covars = num_covars
@@ -42,52 +40,44 @@ class nsgpVI(tf.Module):
         self.mean_len = tf.Variable([0.0], dtype=tf.float64, name='len_mean', trainable=1)
         self.mean_amp = tf.Variable([0.0], dtype=tf.float64, name='var_mean', trainable=1)
         
-        self.beta_len_mean = tf.Variable(np.zeros(self.num_covars), dtype=tf.float64, name='beta_len_mean',trainable=1)
-        self.beta_amp_mean = tf.Variable(np.zeros(self.num_covars), dtype=tf.float64, name='beta_amp_mean',trainable=1)
+        self.beta_len_mean = tf.Variable(np.zeros(self.num_covars), dtype=tf.float64, name='beta_len_mean',trainable=0)
+        self.beta_amp_mean = tf.Variable(np.zeros(self.num_covars), dtype=tf.float64, name='beta_amp_mean',trainable=0)
         
-        self.beta_len_std = tfp.util.TransformedVariable(np.ones(self.num_covars),tfb.Softplus(), dtype=tf.float64, name='beta_len_std',trainable=1)
-        self.beta_amp_std = tfp.util.TransformedVariable(np.ones(self.num_covars),tfb.Softplus(), dtype=tf.float64, name='beta_amp_std',trainable=1)
+        self.beta_len_std = tfp.util.TransformedVariable(1e-1*np.ones(self.num_covars),tfb.Softplus(), dtype=tf.float64, name='beta_len_std',trainable=0)
+        self.beta_amp_std = tfp.util.TransformedVariable(1e-1*np.ones(self.num_covars),tfb.Softplus(), dtype=tf.float64, name='beta_amp_std',trainable=0)
         
-        self.inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='ind_points',trainable=1) #z's for lower level functions
+        self.inducing_index_points = tf.Variable(inducing_index_points,dtype=dtype,name='ind_points',trainable=0) #z's for lower level functions
 
         self.kernel_len = kernel_len
         self.kernel_amp = kernel_amp
-        
-        #parameters for variational distribution for len,phi(l_z) and var,phi(sigma_z)
         self.q_mu = tf.Variable(np.zeros((NUM_LATENT*n_inducing_points),dtype=dtype),name='ind_loc_post', trainable=0)
-        self.len_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='len_scale_post', trainable=0)
-        self.amp_scale = tfp.util.TransformedVariable([np.eye(n_inducing_points, dtype=dtype)],tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),dtype=tf.float64, name='amp_scale_post', trainable=0)
-        self.cc_scale = tf.Variable([np.zeros((n_inducing_points),dtype=dtype)],name='cc_scale',trainable=0)
-
-        len_op = tf.linalg.LinearOperatorLowerTriangular(self.len_scale)
-        amp_op = tf.linalg.LinearOperatorLowerTriangular(self.amp_scale)
-        cc_op = tf.linalg.LinearOperatorDiag(self.cc_scale)
-        self.q_sqrt = tf.linalg.LinearOperatorBlockLowerTriangular([[len_op],[cc_op,amp_op]])    
-
-        #approximation to the posterior: phi(l_z)
+        self.q_scale = tfp.util.TransformedVariable([np.eye(NUM_LATENT*n_inducing_points, dtype=dtype)],
+                                                    tfp.bijectors.FillScaleTriL(diag_shift=np.float64(1e-05)),
+                                                    dtype=tf.float64, name='len_scale_post', trainable=0)
+        
+        self.q_sqrt = tf.linalg.LinearOperatorLowerTriangular(self.q_scale)
+        
         self.variational_inducing_observations_posterior = tfd.MultivariateNormalLinearOperator(
                                                                       loc=self.q_mu,
                                                                       scale=self.q_sqrt) 
 
-        #p(l_z)
-        self.inducing_prior = tfd.MultivariateNormalDiag(loc=tf.zeros((NUM_LATENT*n_inducing_points),dtype=tf.float64),name='ind_prior')
         
+        self.inducing_prior = tfd.MultivariateNormalDiag(loc=tf.zeros((NUM_LATENT*n_inducing_points),dtype=tf.float64),name='ind_prior')
+                        
         
         self.beta_len_prior = tfp.distributions.Normal(loc=prior_beta_len_means,scale=prior_beta_len_std)
         self.beta_amp_prior = tfp.distributions.Normal(loc=prior_beta_amp_means,scale=prior_beta_amp_std)
         
         self.M = n_inducing_points
-        
-#         self.kernel_len_priors = kernel_len_priors
-#         self.kernel_amp_priors = kernel_amp_priors
-        self.obs_noise_prior = obs_noise_prior
-        
-        self.vi_param_list = [self.q_mu, self.len_scale.non_trainable_variables[0], self.amp_scale.non_trainable_variables[0], self.cc_scale] 
 
-        #self.obs_max = tf.Variable([0.01], dtype=tf.float64, name='obs_max', trainable=False)
+        self.vi_param_list = [self.q_mu, #self.inducing_index_points, 
+                              self.q_scale.non_trainable_variables[0], 
+                              self.beta_len_mean,self.beta_amp_mean,
+                              self.beta_len_std.non_trainable_variables[0],
+                              self.beta_amp_std.non_trainable_variables[0]]
         
         self.vgp_observation_noise_variance = tf.Variable(init_observation_noise_variance,dtype=dtype,name='nv', trainable=1)
-
+        
         self.num_sequential_samples=num_sequential_samples
         self.num_parallel_samples=num_parallel_samples
         
@@ -106,87 +96,84 @@ class nsgpVI(tf.Module):
         self.noise_matrix = tf.linalg.set_diag(self.noise_matrix,diag_part)
         self.noise_matrix = tf.linalg.set_diag(self.noise_matrix,off_diag_part,k=1)
         self.noise_matrix = tf.linalg.set_diag(self.noise_matrix,off_diag_part,k=-1)
+    
+    
+    def optimize(self, BATCH_SIZE,  MAX_ITERS=100, lr=1e-2, threshold=None, window=1,patience=1):
+        m_optimizer =  tf.keras.optimizers.Adam(learning_rate=lr)#,momentum=0.0)#False,epsilon=1e-03)#
+        e_optimizer =  tf.keras.optimizers.Adam(learning_rate=lr)#,momentum=0.0)#False,epsilon=1e-03)#
         
-    def optimize(self, BATCH_SIZE, NUM_EPOCHS=100, lr=1e-2):
-
-
-        strategy = tf.distribute.MirroredStrategy()
-        dist_dataset = strategy.experimental_distribute_dataset(self.dataset)
-
-        initial_learning_rate = lr
-        #steps_per_epoch = self.num_training_points//(BATCH_SIZE*SEG_LENGTH)
-        #learning_rate = tf.keras.optimizers.schedules.CosineDecayRestarts(initial_learning_rate, steps_per_epoch, m_mul=0.5)
-
-        
-        optimizer = tf.keras.optimizers.RMSprop(learning_rate=0.01,momentum=0.0)#False,epsilon=1e-03)
-        optimizer_q = tf.keras.optimizers.RMSprop(learning_rate=0.01,momentum=0.0)#False,epsilon=1e-03)
-        #optimizer = tf.keras.optimizers.Adam(learning_rate=0.1)#,momentum=0.0)#False,epsilon=1e-03)
-        #optimizer_q = tf.keras.optimizers.Adam(learning_rate=0.01)#,momentum=0.0)#False,epsilon=1e-03)
-        def train_step(inputs):
+                                                    
+        @tf.function
+        def m_train_step(inputs):
             t_train_batch, x_train_batch, predictor_batch = inputs
             kl_weight = tf.reduce_sum(tf.ones_like(t_train_batch))/self.num_training_points
             with tf.GradientTape(watch_accessed_variables=True) as tape:
                 loss = self.variational_loss(locations=x_train_batch,time_points=t_train_batch,predictor_values=predictor_batch, kl_weight=kl_weight) 
             grads = tape.gradient(loss, self.trainable_variables)
-            return loss, grads
-
+            m_optimizer.apply_gradients(zip(grads, self.trainable_variables))
+            return loss
+        
         @tf.function
-        def distributed_train_step(dataset_inputs):
-            per_replica_losses, per_replica_grads = strategy.run(train_step, args=(dataset_inputs,))
-            return strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None), strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_grads, axis=None)
-
-        def train_step_q(inputs):
+        def e_train_step(inputs):
             t_train_batch, x_train_batch, predictor_batch = inputs
             kl_weight = tf.reduce_sum(tf.ones_like(t_train_batch))/self.num_training_points
             with tf.GradientTape(watch_accessed_variables=False) as tape:
                 tape.watch(self.vi_param_list)
                 loss = self.variational_loss(locations=x_train_batch,time_points=t_train_batch,predictor_values=predictor_batch, kl_weight=kl_weight) 
             grads = tape.gradient(loss, self.vi_param_list)
-            return loss, grads
-
-        @tf.function
-        def distributed_train_step_q(dataset_inputs):
-            per_replica_losses, per_replica_grads = strategy.run(train_step_q, args=(dataset_inputs,))
-            return strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_losses, axis=None), strategy.reduce(tf.distribute.ReduceOp.SUM, per_replica_grads, axis=None)
+            e_optimizer.apply_gradients(zip(grads, self.vi_param_list))
+            return loss
         
-        pbar = tqdm(range(NUM_EPOCHS))
-        loss_history = np.zeros((NUM_EPOCHS))
+        pbar = tqdm(range(MAX_ITERS))
+        loss_history = []
 
-        vi_params = False
+        current_window = None
+        current_window_loss = None
+        patience_count = patience
         for i in pbar:
-            batch_count=0    
-            epoch_loss = 0.0
-            batch_loss = 0.0
-            for batch in self.dataset:
-                try:
-                    if vi_params:
-                        loss, grads = distributed_train_step_q(batch)
-                        batch_loss = loss.numpy()
-                        optimizer_q.apply_gradients(zip(grads, self.vi_param_list))
-                    else:
-                        loss, grads = distributed_train_step(batch)
-                        batch_loss = loss.numpy()
-                        optimizer.apply_gradients(zip(grads, self.trainable_variables))
-                except KeyboardInterrupt:
-                    raise
-                except:
-                    pass
-                vi_params = not vi_params
 
-                    
-                epoch_loss+=batch_loss
-                batch_count+=batch[0].shape[0]
-                #pbar.set_description("Loss %f" % (epoch_loss/batch_count))
-                #pbar.set_description("Loss %f, klen_l %f, kamp_l %f, obs %f" % (epoch_loss/batch_count, self.kernel_len.length_scale.numpy(), self.kernel_amp.length_scale.numpy(),(self.obs_max*tf.nn.sigmoid(self.vgp_observation_noise_variance)).numpy()))
-                
-                if i>0:
-                    pbar.set_description("Loss %f, klen_l %f, kamp_l %f, obs %f" % (loss_history[i-1], self.kernel_len.length_scale.numpy(), self.kernel_amp.length_scale.numpy(),(tf.nn.softplus(self.vgp_observation_noise_variance)).numpy()))
+            
+            previous_window = current_window
+            previous_window_loss = current_window_loss
+            current_window = []
+            current_window_loss = []
+
+            for w in range(window):
+                epoch_loss = 0
+                batch_count=0    
+                for batch in self.dataset:
+                    batch_loss = e_train_step(batch).numpy()
+                    batch_loss = m_train_step(batch).numpy()
+                    epoch_loss += batch_loss
+                    batch_count+=batch[0].shape[0]
+                    pbar.set_description("Loss %f" % (epoch_loss/batch_count))
+                    param_list = []
+                    for param in self.vi_param_list:
+                        param_list.append(param.numpy())
+                    for param in self.trainable_variables:
+                        param_list.append(param.numpy())
+                    current_window.append(param_list)
+                    current_window_loss.append([batch_loss/batch[0].shape[0]])
+                loss_history.append(epoch_loss/batch_count)
+
+            if threshold is None:
+                continue
+            if previous_window is not None:
+                decrease = np.mean(np.array(previous_window_loss)) - np.mean(np.array(current_window_loss))
+                if decrease <= threshold:
+                    patience_count-=1
                 else:
-                    pbar.set_description("Loss %f, klen_l %f, kamp_l %f, obs %f" % (epoch_loss/batch_count, self.kernel_len.length_scale.numpy(), self.kernel_amp.length_scale.numpy(),(tf.nn.softplus(self.vgp_observation_noise_variance)).numpy()))
-            loss_history[i] = epoch_loss/batch_count
-            #print(epoch_loss)
-
+                    patience_count=patience
+                if patience_count==0:
+                    break
+                
+            
+        #for i in range(len(self.vi_param_list)):
+        #    self.vi_param_list[i].assign(np.mean(np.array([cw[i] for cw in current_window]),axis=0))
+        #for i in range(len(self.vi_param_list), len(self.vi_param_list)+len(self.trainable_variables)):
+        #    self.trainable_variables[i-len(self.vi_param_list)].assign(np.mean(np.array([cw[i] for cw in current_window]),axis=0))
         return loss_history
+
 
 
 
@@ -199,13 +186,10 @@ class nsgpVI(tf.Module):
     
     def penalty(self):
         
-        penalty = 2.0*kullback_leibler.kl_divergence(self.variational_inducing_observations_posterior,self.inducing_prior) 
+        penalty = kullback_leibler.kl_divergence(self.variational_inducing_observations_posterior,self.inducing_prior) 
         
-        penalty += 2.0*tf.reduce_sum(tfp.distributions.kl_divergence(tfp.distributions.Normal(loc=self.beta_len_mean,scale=self.beta_len_std),self.beta_len_prior))
-        penalty += 2.0*tf.reduce_sum(tfp.distributions.kl_divergence(tfp.distributions.Normal(loc=self.beta_amp_mean,scale=self.beta_amp_std),self.beta_amp_prior))
-
-        #if self.obs_noise_prior is not None:
-        #   penalty += 2.0*self.obs_noise_prior.log_prob(self.vgp_observation_noise_variance)
+        penalty += tf.reduce_sum(tfp.distributions.kl_divergence(tfp.distributions.Normal(loc=self.beta_len_mean,scale=self.beta_len_std),self.beta_len_prior))
+        penalty += tf.reduce_sum(tfp.distributions.kl_divergence(tfp.distributions.Normal(loc=self.beta_amp_mean,scale=self.beta_amp_std),self.beta_amp_prior))
 
         return penalty
 
@@ -213,7 +197,6 @@ class nsgpVI(tf.Module):
 
         len_vals, amp_vals = self.get_samples(locations,predictor_values,S=self.num_parallel_samples)   
         L = self.non_stat_vel(time_points, len_vals, amp_vals, tf.nn.softplus(self.vgp_observation_noise_variance)) # BxNxN
-        #K = K + (tf.eye(tf.shape(K)[-1], dtype=tf.float64) * ((tf.nn.softplus(self.vgp_observation_noise_variance))+self.jitter))
         
         centered_locations = locations[...,1:,:]-locations[...,0,None,:] #centered observations
 
@@ -240,8 +223,6 @@ class nsgpVI(tf.Module):
         zamp = tf.expand_dims(tf.reshape(self.beta_amp_mean,(1,1,-1)) + (tf.reshape(self.beta_amp_std,(1,1,-1))*z),-1)
         scaled_predictors_amp = tf.linalg.matmul(tf.expand_dims(predictor_values,0),zamp)
 
-        #return tf.math.exp(self.mean_len + len_samples), \
-        #        tf.math.exp(self.mean_amp + amp_samples)
         return tf.math.exp(self.mean_len + scaled_predictors_len + len_samples), \
                 tf.math.exp(self.mean_amp + scaled_predictors_amp + amp_samples)
     
@@ -311,11 +292,9 @@ class nsgpVI(tf.Module):
         
         """Non-stationary integrated Matern12 kernel"""
         stddev = tf.math.sqrt(var)
-        #sigma_ = 0.5*(stddev[...,:-1,0,None] + stddev[...,1:,0,None])
-        #len_ = 0.5*(lengthscales[...,:-1,0,None] + lengthscales[...,1:,0,None])
-        sigma_ = stddev[...,0,None]# + stddev[...,1:,0,None])
-        len_ = lengthscales[...,0,None]# + lengthscales[...,1:,0,None])
-
+        
+        sigma_ = stddev[...,0,None]
+        len_ = lengthscales[...,0,None]
         Ls = tf.square(len_)
 
         L = tf.math.sqrt(0.5*(Ls + tf.linalg.matrix_transpose(Ls)))
@@ -345,7 +324,6 @@ class nsgpVI(tf.Module):
 
         cholesky_factor = tf.linalg.matmul(self.LT,tf.linalg.cholesky(M))
 
-        #K = tf.math.cumsum(tf.math.cumsum(Epq_grid,axis=-2,exclusive=False),axis=-1,exclusive=False)
         
         return cholesky_factor
     
