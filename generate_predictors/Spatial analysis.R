@@ -4,7 +4,7 @@
 ################################################################################
 # In this script we calculates distance from Wb locations to nearest edge,
 # village,extract tourism footprint(as a metric of tourism pressure), and 
-# Temperature from ERA5-Land product available in google earth engine
+# NDVI from MODIS product available in google earth engine
 
 rm(list = ls())
 
@@ -111,17 +111,17 @@ saveBestJoin<-ee$Join$saveBest(
   measureKey="timeDiff"
 )
 
-#Function to add property with Temperature value from the matched MODIS image
+#Function to add property with NDVI value from the matched MODIS image
 add_NDVI<-function(feature){
-  #Get the best image and select temperature
+  #Get the best image and select NDVI
   img1<-ee$Image(feature$get("bestImage"))$select('NDVI')
   #Get ID
   id<-feature$id()
   #Extract geometry from the features
   point<-feature$geometry()
-  #Get temperature value for each point at 250 M resolution
+  #Get NDVI value for each point at 250 M resolution
   NDVI_value<-img1$sample(region=point, scale=250, tileScale = 16,dropNulls= FALSE)
-  #Return the data containing temperature and ids 
+  #Return the data containing NDVI and ids 
   feature$setMulti(list(NDVI= NDVI_value$first()$get('NDVI'), ID=id,DateTimeImage = img1$get('system:index')))
 }
 
@@ -166,7 +166,7 @@ head(el)
 el<-st_transform(el,4326)
 
 ################################################################################
-# Extract hour air Temperature
+# NDVI spatial-temporal matching and extraction
 ################################################################################
 ## Collecting image from GGE
 imagecoll<-ee$ImageCollection("MODIS/006/MOD13Q1")$filterDate("1998-01-01","2019-08-30")
@@ -175,10 +175,10 @@ imagecoll<-ee$ImageCollection("MODIS/006/MOD13Q1")$filterDate("1998-01-01","2019
 el$uniq <- rep(1:1000, each=1000)[1:nrow(el)] 
 
 
-# Create empty data frame to be filled with temperature extraction values from the loop
+# Create empty data frame to be filled with NDVI extracted values from the loop
 dataoutput<- data.frame()
 
-# Looping to extract the temperature values
+# Looping to extract the NDVI values
 tic()
 for(x in unique(el$uniq)){
   data1 <- el %>% filter(uniq == x)
@@ -188,7 +188,7 @@ for(x in unique(el$uniq)){
   data<-data$map(add_date)
   # Apply the join.
   Data_match<-saveBestJoin$apply(data, imagecoll, maxDiffFilter)
-  #Add temperature to the data
+  #Add NDVI to the data
   DataFinal<-Data_match$map(add_NDVI)
   #Remove image property from the data
   DataFinal<-DataFinal$map(removeProperty)
@@ -205,7 +205,7 @@ el_timematch<-data.frame(dataoutput)
 # Multiply by 0.0001 to convert NDVI to the range of 0-1
 el_timematch$NDVI<-el_timematch$NDVI*0.0001
 
-## Add Temp column to Wb data frame by Matching with el_timematch df
+## Add NDVI column to Wb data frame by Matching with el_timematch df
 Wb$NDVI<-el_timematch$NDVI[match(Wb$No_ID,el_timematch$No_ID)]
 
 #Save to the working directory
