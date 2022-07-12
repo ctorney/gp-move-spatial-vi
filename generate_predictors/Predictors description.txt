@@ -10,5 +10,4 @@ iii)Village_Dist (Distance to nearest village):Euclidean distance to nearest vil
 
 iv) Rangerpost_Dist(Distance to park rangerposts): Euclidean distance to nearest park rangerpost calculated in kilometres
 
-v) Temp(Temperature): The degree of hotness or coldness in Celsius extracted from hourly air 
- temperature from ERA5-Land Hourly - ECMWF Climate Reanalysis product
+v) NDVI: Normalized difference vegetation index indicating the quality of vegetation over a period of 16 days obtained from MODIS.
