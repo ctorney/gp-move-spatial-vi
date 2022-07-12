@@ -166,7 +166,7 @@ head(el)
 el<-st_transform(el,4326)
 
 ################################################################################
-# NDVI spatial-temporal matching and extraction
+#     NDVI spatial-temporal matching and extraction
 ################################################################################
 ## Collecting image from GGE
 imagecoll<-ee$ImageCollection("MODIS/006/MOD13Q1")$filterDate("1998-01-01","2019-08-30")
