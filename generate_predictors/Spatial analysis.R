@@ -73,10 +73,10 @@ Wb@data$Tourism_fpt<-raster::extract(Tourism,Wb,na.rm= TRUE)
 Wb<-data.frame(Wb)
 
 ################################################################################
-# Extracting Time match Temperature in Google earth engine through R
+# Extracting Time match NDVI in Google earth engine through R
 ################################################################################
 
-# This script extract hourly air temperature from ERA5-Land Hourly - ECMWF Climate Reanalysis
+# This script extract 16-day NDVI product from MODIS
 # Matching the location and the nearest time of the wildebeest 
 # Load packages
 require(rgee)
@@ -112,17 +112,17 @@ saveBestJoin<-ee$Join$saveBest(
 )
 
 #Function to add property with Temperature value from the matched MODIS image
-add_Temp<-function(feature){
+add_NDVI<-function(feature){
   #Get the best image and select temperature
-  img1<-ee$Image(feature$get("bestImage"))$select("temperature_2m")
+  img1<-ee$Image(feature$get("bestImage"))$select('NDVI')
   #Get ID
   id<-feature$id()
   #Extract geometry from the features
   point<-feature$geometry()
   #Get temperature value for each point at 250 M resolution
-  Temp_value<-img1$sample(region=point, scale=250, tileScale = 16,dropNulls= FALSE)
+  NDVI_value<-img1$sample(region=point, scale=250, tileScale = 16,dropNulls= FALSE)
   #Return the data containing temperature and ids 
-  feature$setMulti(list(Temp= Temp_value$first()$get('temperature_2m'), ID=id,DateTimeImage = img1$get('system:index')))
+  feature$setMulti(list(NDVI= NDVI_value$first()$get('NDVI'), ID=id,DateTimeImage = img1$get('system:index')))
 }
 
 # Function to remove NDVI image property from features
@@ -169,7 +169,7 @@ el<-st_transform(el,4326)
 # Extract hour air Temperature
 ################################################################################
 ## Collecting image from GGE
-imagecoll<-ee$ImageCollection("ECMWF/ERA5_LAND/HOURLY")$filterDate("1998-01-01","2019-08-30")
+imagecoll<-ee$ImageCollection("MODIS/006/MOD13Q1")$filterDate("1998-01-01","2019-08-30")
 
 # Adding uniq column and replicating unique number after every 1000
 el$uniq <- rep(1:1000, each=1000)[1:nrow(el)] 
@@ -189,7 +189,7 @@ for(x in unique(el$uniq)){
   # Apply the join.
   Data_match<-saveBestJoin$apply(data, imagecoll, maxDiffFilter)
   #Add temperature to the data
-  DataFinal<-Data_match$map(add_Temp)
+  DataFinal<-Data_match$map(add_NDVI)
   #Remove image property from the data
   DataFinal<-DataFinal$map(removeProperty)
   # Transform GEE object in sf
@@ -202,11 +202,11 @@ toc()
 #Convert to a dataframe
 el_timematch<-data.frame(dataoutput)
 
-# Substract temperature by 273.15 to change celsius because the now are in kelvin
-el_timematch$Temp<-el_timematch$Temp-273.15
+# Multiply by 0.0001 to convert NDVI to the range of 0-1
+el_timematch$NDVI<-el_timematch$NDVI*0.0001
 
 ## Add Temp column to Wb data frame by Matching with el_timematch df
-Wb$Temp<-el_timematch$Temp[match(Wb$No_ID,el_timematch$No_ID)]
+Wb$NDVI<-el_timematch$NDVI[match(Wb$No_ID,el_timematch$No_ID)]
 
 #Save to the working directory
 write.csv(Wb, file="./Data/Wildebeest2019.csv")
